@@ -4,19 +4,34 @@ import React, { useState, useRef, useEffect } from 'react';
 import { cn } from '@/lib/utils';
 import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
-import { Upload, Play, Pause, Scissors } from 'lucide-react';
+import { Upload, Play, Pause, Scissors, RefreshCw, Loader2 } from 'lucide-react';
+import { useStickerCanvas } from '@/hooks/useStickerCanvas';
+import { useAudioProcessor } from '@/hooks/useAudioProcessor';
 
 export default function Editor() {
     const containerRef = useRef<HTMLDivElement>(null);
     const wavesurfer = useRef<WaveSurfer | null>(null);
+    const regionsPlugin = useRef<RegionsPlugin | null>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [audioFile, setAudioFile] = useState<File | null>(null);
     const [transcript, setTranscript] = useState("");
     const [region, setRegion] = useState<{ start: number, end: number } | null>(null);
-    const [isExporting, setIsExporting] = useState(false);
-    const canvasRef = useRef<HTMLCanvasElement>(null);
+
+    // Style State
     const [bgColor, setBgColor] = useState("#000000");
     const [textColor, setTextColor] = useState("#ffffff");
+    const [bgImage, setBgImage] = useState<HTMLImageElement | null>(null);
+    const [fontSize, setFontSize] = useState(80);
+
+    const [isMounted, setIsMounted] = useState(false);
+
+    // Custom Hooks
+    const { canvasRef, generateImageBlob } = useStickerCanvas({ transcript, bgColor, textColor, bgImage, fontSize });
+    const { isLoaded: isFFmpegLoaded, isProcessing, error: processingError, exportAudio, exportVideo } = useAudioProcessor();
+
+    useEffect(() => {
+        setIsMounted(true);
+    }, []);
 
     useEffect(() => {
         if (!containerRef.current) return;
@@ -35,6 +50,7 @@ export default function Editor() {
         });
 
         const wsRegions = ws.registerPlugin(RegionsPlugin.create());
+        regionsPlugin.current = wsRegions;
 
         wsRegions.enableDragSelection({
             color: 'rgba(168, 85, 247, 0.2)', // Purple with opacity
@@ -65,87 +81,57 @@ export default function Editor() {
 
     const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
+        if (!file) return;
+
+        if (!file.type.startsWith('audio/')) {
+            alert("Please upload a valid audio file.");
+            return;
+        }
+
         if (file && wavesurfer.current) {
             setAudioFile(file);
             const url = URL.createObjectURL(file);
             wavesurfer.current.load(url);
+
+            // Auto-select first 10 seconds
+            wavesurfer.current.on('ready', () => {
+                const duration = wavesurfer.current?.getDuration() || 0;
+                const end = Math.min(duration, 10);
+                regionsPlugin.current?.addRegion({
+                    start: 0,
+                    end: end,
+                    color: 'rgba(168, 85, 247, 0.2)'
+                });
+            });
         }
+    };
+
+    const handleReplaceAudio = () => {
+        setAudioFile(null);
+        setRegion(null);
+        wavesurfer.current?.empty();
     };
 
     const togglePlay = () => {
         wavesurfer.current?.playPause();
     };
 
-    const updateCanvas = () => {
-        if (!canvasRef.current) return;
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-
-        // Set dimensions (square for stickers)
-        // Display size vs internal resolution
-        const size = 1080;
-        canvas.width = size;
-        canvas.height = size;
-
-        // Draw Background
-        ctx.fillStyle = bgColor;
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        // Draw Text
-        ctx.fillStyle = textColor;
-        ctx.font = 'bold 80px sans-serif'; // Larger font
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-
-        // Simple text wrapping
-        const words = transcript.split(' ');
-        const maxWidth = canvas.width - 200;
-        const lineHeight = 100;
-        let lines = [];
-        let currentLine = words[0] || '';
-
-        for (let i = 1; i < words.length; i++) {
-            const width = ctx.measureText(currentLine + " " + words[i]).width;
-            if (width < maxWidth) {
-                currentLine += " " + words[i];
-            } else {
-                lines.push(currentLine);
-                currentLine = words[i];
-            }
+    const handleBgImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (file) {
+            const img = new Image();
+            img.src = URL.createObjectURL(file);
+            img.onload = () => {
+                setBgImage(img);
+            };
         }
-        lines.push(currentLine);
-
-        // Draw lines centered vertically
-        const totalHeight = lines.length * lineHeight;
-        let startY = (canvas.height - totalHeight) / 2 + (lineHeight / 2);
-
-        if (words.length === 0 || transcript.trim() === '') {
-            ctx.fillStyle = textColor + '50'; // Transparent
-            ctx.fillText("Lyrics Preview", canvas.width / 2, canvas.height / 2);
-        } else {
-            lines.forEach((line, i) => {
-                ctx.fillText(line, canvas.width / 2, startY + (i * lineHeight));
-            });
-        }
-    };
-
-    useEffect(() => {
-        updateCanvas();
-    }, [transcript, bgColor, textColor]);
-
-    const generateImageBlob = async (): Promise<Blob | null> => {
-        if (!canvasRef.current) return null;
-        return new Promise(resolve => canvasRef.current?.toBlob(resolve, 'image/png'));
     };
 
     const handleExport = async (type: 'audio' | 'video') => {
         if (!audioFile || !region) return;
 
-        setIsExporting(true);
         try {
-            const { audioProcessor } = await import('@/lib/audioProcessor');
-            const audioBlob = await audioProcessor.trimAudio(audioFile, region.start, region.end);
+            const audioBlob = await exportAudio(audioFile, region.start, region.end);
 
             let finalBlob = audioBlob;
             let extension = 'mp3';
@@ -153,7 +139,7 @@ export default function Editor() {
             if (type === 'video') {
                 const imageBlob = await generateImageBlob();
                 if (imageBlob) {
-                    finalBlob = await audioProcessor.createVideo(audioBlob, imageBlob);
+                    finalBlob = await exportVideo(audioBlob, imageBlob);
                     extension = 'mp4';
                 }
             }
@@ -168,12 +154,13 @@ export default function Editor() {
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
         } catch (error) {
-            console.error("Export failed:", error);
-            alert("Export failed. See console for details.");
-        } finally {
-            setIsExporting(false);
+            // Error handled in hook
         }
     };
+
+    if (!isMounted) {
+        return null;
+    }
 
     return (
         <div className="flex flex-col h-full w-full p-6 gap-6">
@@ -192,7 +179,16 @@ export default function Editor() {
                 <div className="flex items-center justify-between mb-2">
                     <h2 className="text-white/70 font-medium text-sm uppercase tracking-wider">Waveform</h2>
                     {audioFile && (
-                        <span className="text-xs text-white/30">{audioFile.name}</span>
+                        <div className="flex items-center gap-4">
+                            <span className="text-xs text-white/30">{audioFile.name}</span>
+                            <button
+                                onClick={handleReplaceAudio}
+                                className="text-xs flex items-center gap-1 text-red-400 hover:text-red-300 transition-colors"
+                            >
+                                <RefreshCw className="w-3 h-3" />
+                                Replace Audio
+                            </button>
+                        </div>
                     )}
                 </div>
 
@@ -235,7 +231,21 @@ export default function Editor() {
                         {/* Style Controls */}
                         <div className="flex flex-col gap-4 flex-1">
                             <div className="space-y-2">
-                                <label className="text-xs text-white/50 block">Background Color</label>
+                                <label className="text-xs text-white/50 block">Background Image</label>
+                                <label className="flex items-center gap-2 cursor-pointer bg-white/5 hover:bg-white/10 border border-white/20 rounded-lg p-2 transition-colors">
+                                    <Upload className="w-4 h-4 text-white/70" />
+                                    <span className="text-xs text-white/70">Upload Image</span>
+                                    <input type="file" accept="image/*" onChange={handleBgImageUpload} className="hidden" />
+                                </label>
+                                {bgImage && (
+                                    <button onClick={() => setBgImage(null)} className="text-xs text-red-400 hover:text-red-300">
+                                        Remove Image
+                                    </button>
+                                )}
+                            </div>
+
+                            <div className="space-y-2">
+                                <label className="text-xs text-white/50 block">Background Color (Fallback)</label>
                                 <div className="flex items-center gap-3">
                                     <div className="relative w-10 h-10 rounded-full overflow-hidden border border-white/20 cursor-pointer hover:scale-110 transition-transform">
                                         <input
@@ -263,6 +273,18 @@ export default function Editor() {
                                     <span className="text-xs font-mono text-white/70">{textColor}</span>
                                 </div>
                             </div>
+
+                            <div className="space-y-2">
+                                <label className="text-xs text-white/50 block">Font Size ({fontSize}px)</label>
+                                <input
+                                    type="range"
+                                    min="40"
+                                    max="150"
+                                    value={fontSize}
+                                    onChange={(e) => setFontSize(Number(e.target.value))}
+                                    className="w-full h-2 bg-white/20 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                                />
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -270,25 +292,33 @@ export default function Editor() {
 
             {/* Action Bar */}
             <div className="h-20 bg-white/5 rounded-xl border border-white/10 flex items-center justify-between px-6">
-                <div className="text-white/50 text-sm">
-                    Select a region on the waveform to export.
+                <div className="text-white/50 text-sm flex items-center gap-2">
+                    {!isFFmpegLoaded ? (
+                        <span className="flex items-center gap-2 text-yellow-500">
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            Loading Audio Processor...
+                        </span>
+                    ) : (
+                        "Select a region on the waveform to export."
+                    )}
+                    {processingError && <span className="text-red-400">{processingError}</span>}
                 </div>
                 <div className="flex gap-2">
                     <button
                         onClick={() => handleExport('audio')}
-                        disabled={!region || isExporting}
+                        disabled={!region || isProcessing || !isFFmpegLoaded}
                         className="bg-white/10 hover:bg-white/20 text-white px-6 py-2 rounded-lg font-medium transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                        <Scissors className="w-4 h-4" />
-                        {isExporting ? '...' : 'Audio Only'}
+                        {isProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Scissors className="w-4 h-4" />}
+                        {isProcessing ? 'Processing...' : 'Audio Only'}
                     </button>
                     <button
                         onClick={() => handleExport('video')}
-                        disabled={!region || isExporting}
+                        disabled={!region || isProcessing || !isFFmpegLoaded}
                         className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white px-6 py-2 rounded-lg font-medium transition-all flex items-center gap-2 shadow-lg shadow-purple-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                        <Scissors className="w-4 h-4" />
-                        {isExporting ? 'Exporting...' : 'Export Video'}
+                        {isProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Scissors className="w-4 h-4" />}
+                        {isProcessing ? 'Exporting...' : (!region ? 'Select Region' : 'Export Video')}
                     </button>
                 </div>
             </div>
