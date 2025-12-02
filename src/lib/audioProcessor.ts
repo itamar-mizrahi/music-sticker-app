@@ -2,15 +2,17 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { toBlobURL } from '@ffmpeg/util';
 
 export class AudioProcessor {
-  private ffmpeg: FFmpeg;
+  private ffmpeg: FFmpeg | null = null;
   private loaded: boolean = false;
 
-  constructor() {
-    this.ffmpeg = new FFmpeg();
-  }
+  constructor() {}
 
   async load() {
-    if (this.loaded) return;
+    if (this.loaded && this.ffmpeg) return;
+    
+    if (!this.ffmpeg) {
+        this.ffmpeg = new FFmpeg();
+    }
     
     const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
     await this.ffmpeg.load({
@@ -25,6 +27,8 @@ export class AudioProcessor {
 
     const inputName = 'input.' + audioFile.name.split('.').pop();
     const outputName = 'output.mp3';
+
+    if (!this.ffmpeg) throw new Error("FFmpeg not initialized");
 
     await this.ffmpeg.writeFile(inputName, await fetchFile(audioFile));
 
@@ -48,6 +52,8 @@ export class AudioProcessor {
     const audioName = 'input_audio.mp3';
     const imageName = 'input_image.png';
     const outputName = 'output_video.mp4';
+
+    if (!this.ffmpeg) throw new Error("FFmpeg not initialized");
 
     await this.ffmpeg.writeFile(audioName, await fetchFile(new File([audioBlob], audioName)));
     await this.ffmpeg.writeFile(imageName, await fetchFile(new File([imageBlob], imageName)));
