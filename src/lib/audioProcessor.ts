@@ -39,7 +39,35 @@ export class AudioProcessor {
     ]);
 
     const data = await this.ffmpeg.readFile(outputName);
-    return new Blob([data], { type: 'audio/mpeg' });
+    return new Blob([data as any], { type: 'audio/mpeg' });
+  }
+
+  async createVideo(audioBlob: Blob, imageBlob: Blob): Promise<Blob> {
+    if (!this.loaded) await this.load();
+
+    const audioName = 'input_audio.mp3';
+    const imageName = 'input_image.png';
+    const outputName = 'output_video.mp4';
+
+    await this.ffmpeg.writeFile(audioName, await fetchFile(new File([audioBlob], audioName)));
+    await this.ffmpeg.writeFile(imageName, await fetchFile(new File([imageBlob], imageName)));
+
+    // ffmpeg -loop 1 -i image.png -i audio.mp3 -c:v libx264 -tune stillimage -c:a aac -b:a 192k -pix_fmt yuv420p -shortest output.mp4
+    await this.ffmpeg.exec([
+        '-loop', '1',
+        '-i', imageName,
+        '-i', audioName,
+        '-c:v', 'libx264',
+        '-tune', 'stillimage',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-pix_fmt', 'yuv420p',
+        '-shortest',
+        outputName
+    ]);
+
+    const data = await this.ffmpeg.readFile(outputName);
+    return new Blob([data as any], { type: 'video/mp4' });
   }
 }
 
